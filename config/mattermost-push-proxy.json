@@ -23,11 +23,11 @@
     "AndroidPushSettings":[
         {
             "Type":"android",
-            "AndroidApiKey":""
+            "AndroidApiKey":"AAAA6U__2_o:APA91bH-NEpuX7GqPiKRscraNjcK2PgvguVLwYR1xxU8O9j0rebcBztbl2WazacTqdN9Jzww12HuP0_eEYnbgNhKPzvm3m_hiYMiR11yoiHKiJhW91Us7n9a6qWShjEGU-w9VhYsHVIb"
         },
         {
             "Type":"android_rn",
-            "AndroidApiKey":""
+            "AndroidApiKey":"AAAA6U__2_o:APA91bH-NEpuX7GqPiKRscraNjcK2PgvguVLwYR1xxU8O9j0rebcBztbl2WazacTqdN9Jzww12HuP0_eEYnbgNhKPzvm3m_hiYMiR11yoiHKiJhW91Us7n9a6qWShjEGU-w9VhYsHVIb"
         }
     ]
 }
