@@ -8,19 +8,27 @@ import (
 	"time"
 
 	"github.com/prometheus/common/expfmt"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMetricDisabled(t *testing.T) {
 	t.Log("Testing Metrics Enabled")
-	LoadConfig("mattermost-push-proxy.json")
 	platform := "junk"
-	pushType := PUSH_TYPE_MESSAGE
-	CfgPP.AndroidPushSettings[0].AndroidApiKey = platform
-	CfgPP.EnableMetrics = false
-	Start()
+	pushType := PushTypeMessage
+
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+	cfg.AndroidPushSettings[0].AndroidAPIKey = platform
+	cfg.EnableMetrics = false
+
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 	defer func() {
-		Stop()
+		srv.Stop()
 		time.Sleep(time.Second * 2)
 	}()
 
@@ -29,8 +37,8 @@ func TestMetricDisabled(t *testing.T) {
 	incrementSuccess(platform, pushType)
 	incrementRemoval(platform, pushType, "not registered")
 	incrementFailure(platform, pushType, "error")
-	observerNotificationResponse(PUSH_NOTIFY_APPLE, 1)
-	observerNotificationResponse(PUSH_NOTIFY_ANDROID, 1)
+	observerNotificationResponse(PushNotifyApple, 1)
+	observerNotificationResponse(PushNotifyAndroid, 1)
 	observeServiceResponse(1)
 
 	resp, err := http.Get("http://localhost:8066/metrics")
@@ -50,15 +58,22 @@ func TestMetricDisabled(t *testing.T) {
 
 func TestMetricEnabled(t *testing.T) {
 	t.Log("Testing Metrics Enabled")
-	LoadConfig("mattermost-push-proxy.json")
 	platform := "junk"
-	pushType := PUSH_TYPE_MESSAGE
-	CfgPP.AndroidPushSettings[0].AndroidApiKey = platform
-	CfgPP.EnableMetrics = true
-	Start()
+	pushType := PushTypeMessage
+
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+	cfg.AndroidPushSettings[0].AndroidAPIKey = platform
+	cfg.EnableMetrics = true
+
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 	defer func() {
-		Stop()
+		srv.Stop()
 		time.Sleep(time.Second * 2)
 	}()
 
@@ -67,8 +82,8 @@ func TestMetricEnabled(t *testing.T) {
 	incrementSuccess(platform, pushType)
 	incrementRemoval(platform, pushType, "not registered")
 	incrementFailure(platform, pushType, "error")
-	observerNotificationResponse(PUSH_NOTIFY_APPLE, 1)
-	observerNotificationResponse(PUSH_NOTIFY_ANDROID, 1)
+	observerNotificationResponse(PushNotifyApple, 1)
+	observerNotificationResponse(PushNotifyAndroid, 1)
 	observeServiceResponse(1)
 
 	resp, err := http.Get("http://localhost:8066/metrics")

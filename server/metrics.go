@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var MetricsEnabled bool
@@ -121,7 +122,7 @@ func init() {
 }
 
 func NewPrometheusHandler() http.Handler {
-	return prometheus.Handler()
+	return promhttp.Handler()
 }
 
 func incrementNotificationTotal(platform, pushType string) {
@@ -194,12 +195,10 @@ func observerNotificationResponse(platform string, dur float64) {
 		metricNotificationResponse.WithLabelValues(platform).Observe(dur)
 
 		switch platform {
-		case PUSH_NOTIFY_APPLE:
+		case PushNotifyApple:
 			observeAPNSResponse(dur)
-			break
-		case PUSH_NOTIFY_ANDROID:
+		case PushNotifyAndroid:
 			observeFCMResponse(dur)
-			break
 		}
 	}
 }

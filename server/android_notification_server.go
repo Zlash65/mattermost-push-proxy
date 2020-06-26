@@ -4,7 +4,6 @@
 package server
 
 import (
-	"fmt"
 	"time"
 
 	fcm "github.com/appleboy/go-fcm"
@@ -13,17 +12,21 @@ import (
 
 type AndroidNotificationServer struct {
 	AndroidPushSettings AndroidPushSettings
+	logger              *Logger
 }
 
-func NewAndroideNotificationServer(settings AndroidPushSettings) NotificationServer {
-	return &AndroidNotificationServer{AndroidPushSettings: settings}
+func NewAndroidNotificationServer(settings AndroidPushSettings, logger *Logger) NotificationServer {
+	return &AndroidNotificationServer{
+		AndroidPushSettings: settings,
+		logger:              logger,
+	}
 }
 
 func (me *AndroidNotificationServer) Initialize() bool {
-	LogInfo(fmt.Sprintf("Initializing Android notification server for type=%v", me.AndroidPushSettings.Type))
+	me.logger.Infof("Initializing Android notification server for type=%v", me.AndroidPushSettings.Type)
 
-	if len(me.AndroidPushSettings.AndroidApiKey) == 0 {
-		LogError("Android push notifications not configured.  Missing AndroidApiKey.")
+	if len(me.AndroidPushSettings.AndroidAPIKey) == 0 {
+		me.logger.Error("Android push notifications not configured.  Missing AndroidAPIKey.")
 		return false
 	}
 
@@ -33,56 +36,56 @@ func (me *AndroidNotificationServer) Initialize() bool {
 func (me *AndroidNotificationServer) SendNotification(msg *PushNotification) PushResponse {
 	pushType := msg.Type
 	data := map[string]interface{}{
-		"ack_id":     msg.AckId,
+		"ack_id":     msg.AckID,
 		"type":       pushType,
 		"badge":      msg.Badge,
 		"version":    msg.Version,
-		"channel_id": msg.ChannelId,
+		"channel_id": msg.ChannelID,
 	}
 
-	if msg.IsIdLoaded {
-		data["post_id"] = msg.PostId
+	if msg.IsIDLoaded {
+		data["post_id"] = msg.PostID
 		data["message"] = msg.Message
 		data["id_loaded"] = true
-		data["sender_id"] = msg.SenderId
+		data["sender_id"] = msg.SenderID
 		data["sender_name"] = "Someone"
-	} else if pushType == PUSH_TYPE_MESSAGE {
-		data["team_id"] = msg.TeamId
-		data["sender_id"] = msg.SenderId
+	} else if pushType == PushTypeMessage || pushType == PushTypeSession {
+		data["team_id"] = msg.TeamID
+		data["sender_id"] = msg.SenderID
 		data["sender_name"] = msg.SenderName
 		data["message"] = emoji.Sprint(msg.Message)
 		data["channel_name"] = msg.ChannelName
-		data["post_id"] = msg.PostId
-		data["root_id"] = msg.RootId
+		data["post_id"] = msg.PostID
+		data["root_id"] = msg.RootID
 		data["override_username"] = msg.OverrideUsername
-		data["override_icon_url"] = msg.OverrideIconUrl
+		data["override_icon_url"] = msg.OverrideIconURL
 		data["from_webhook"] = msg.FromWebhook
 	}
 
-	incrementNotificationTotal(PUSH_NOTIFY_ANDROID, pushType)
+	incrementNotificationTotal(PushNotifyAndroid, pushType)
 
 	fcmMsg := &fcm.Message{
-		To:       msg.DeviceId,
+		To:       msg.DeviceID,
 		Data:     data,
 		Priority: "high",
 	}
 
-	if len(me.AndroidPushSettings.AndroidApiKey) > 0 {
-		sender, err := fcm.NewClient(me.AndroidPushSettings.AndroidApiKey)
+	if len(me.AndroidPushSettings.AndroidAPIKey) > 0 {
+		sender, err := fcm.NewClient(me.AndroidPushSettings.AndroidAPIKey)
 		if err != nil {
-			incrementFailure(PUSH_NOTIFY_ANDROID, pushType, "invalid ApiKey")
+			incrementFailure(PushNotifyAndroid, pushType, "invalid ApiKey")
 			return NewErrorPushResponse(err.Error())
 		}
 
-		LogInfo(fmt.Sprintf("Sending android push notification for device=%v and type=%v", me.AndroidPushSettings.Type, msg.Type))
+		me.logger.Infof("Sending android push notification for device=%v and type=%v", me.AndroidPushSettings.Type, msg.Type)
 
 		start := time.Now()
 		resp, err := sender.SendWithRetry(fcmMsg, 2)
-		observerNotificationResponse(PUSH_NOTIFY_ANDROID, time.Since(start).Seconds())
+		observerNotificationResponse(PushNotifyAndroid, time.Since(start).Seconds())
 
 		if err != nil {
-			LogError(fmt.Sprintf("Failed to send FCM push sid=%v did=%v err=%v type=%v", msg.ServerId, msg.DeviceId, err, me.AndroidPushSettings.Type))
-			incrementFailure(PUSH_NOTIFY_ANDROID, pushType, "unknown transport error")
+			me.logger.Errorf("Failed to send FCM push sid=%v did=%v err=%v type=%v", msg.ServerID, msg.DeviceID, err, me.AndroidPushSettings.Type)
+			incrementFailure(PushNotifyAndroid, pushType, "unknown transport error")
 			return NewErrorPushResponse("unknown transport error")
 		}
 
@@ -90,21 +93,21 @@ func (me *AndroidNotificationServer) SendNotification(msg *PushNotification) Pus
 			fcmError := resp.Results[0].Error
 
 			if fcmError == fcm.ErrInvalidRegistration || fcmError == fcm.ErrNotRegistered || fcmError == fcm.ErrMissingRegistration {
-				LogInfo(fmt.Sprintf("Android response failure sending remove code: %v type=%v", resp, me.AndroidPushSettings.Type))
-				incrementRemoval(PUSH_NOTIFY_ANDROID, pushType, fcmError.Error())
+				me.logger.Infof("Android response failure sending remove code: %v type=%v", resp, me.AndroidPushSettings.Type)
+				incrementRemoval(PushNotifyAndroid, pushType, fcmError.Error())
 				return NewRemovePushResponse()
 			}
 
-			LogError(fmt.Sprintf("Android response failure: %v type=%v", resp, me.AndroidPushSettings.Type))
-			incrementFailure(PUSH_NOTIFY_ANDROID, pushType, fcmError.Error())
+			me.logger.Errorf("Android response failure: %v type=%v", resp, me.AndroidPushSettings.Type)
+			incrementFailure(PushNotifyAndroid, pushType, fcmError.Error())
 			return NewErrorPushResponse(fcmError.Error())
 		}
 	}
 
-	if len(msg.AckId) > 0 {
-		incrementSuccessWithAck(PUSH_NOTIFY_ANDROID, pushType)
+	if len(msg.AckID) > 0 {
+		incrementSuccessWithAck(PushNotifyAndroid, pushType)
 	} else {
-		incrementSuccess(PUSH_NOTIFY_ANDROID, pushType)
+		incrementSuccess(PushNotifyAndroid, pushType)
 	}
 	return NewOkPushResponse()
 }

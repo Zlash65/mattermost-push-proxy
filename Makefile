@@ -1,65 +1,55 @@
-.PHONY: all dist build-server package test clean run update-dependencies-after-release gofmt govet check-style
+.PHONY: all dist build-server package test clean run update-dependencies gofmt govet golangci-lint
 
-GOPATH ?= $(GOPATH:)
 GOFLAGS ?= $(GOFLAGS:)
 BUILD_NUMBER ?= $(BUILD_NUMBER:)
 BUILD_DATE = $(shell date -u)
 BUILD_HASH = $(shell git rev-parse HEAD)
-CC_FOR_TARGET ?= "x86_64-linux-musl-gcc"
+LDFLAGS ?= $(LDFLAGS:)
 
+export GOBIN = $(PWD)/bin
 GO=go
 
 ifeq ($(BUILD_NUMBER),)
 	BUILD_NUMBER := dev
 endif
 
+LDFLAGS += -X "github.com/mattermost/mattermost-push-proxy/server.BuildNumber=$(BUILD_NUMBER)"
+LDFLAGS += -X "github.com/mattermost/mattermost-push-proxy/server.BuildDate=$(BUILD_DATE)"
+LDFLAGS += -X "github.com/mattermost/mattermost-push-proxy/server.BuildHash=$(BUILD_HASH)"
+
 DIST_ROOT=dist
 DIST_PATH=$(DIST_ROOT)/mattermost-push-proxy
 
-TESTS=.
+include build/*.mk
 
 all: dist
 
-check-style: gofmt govet
-
 dist: | gofmt govet build-server test package
 
-update-dependencies-after-release:
-	@echo Run this to updated the go lang dependencies after a major release
-	dep ensure -update
+update-dependencies:
+	$(GO) get -u ./...
+	$(GO) mod tidy
 
-build-server: gofmt govet
+build-server: gofmt
 	@echo Building proxy push server
 
-	rm -Rf $(DIST_ROOT)
-	$(GO) clean $(GOFLAGS) -i ./...
+	$(GO) build -o $(GOBIN) -ldflags '$(LDFLAGS)' $(GOFLAGS)
 
-	$(GO) build $(GOFLAGS) ./...
-	$(GO) install $(GOFLAGS) ./...
-
-gofmt:
-	@echo GOFMT
-	$(eval GOFMT_OUTPUT := $(shell gofmt -d -s server/ main.go 2>&1))
-	@echo "$(GOFMT_OUTPUT)"
-	@if [ ! "$(GOFMT_OUTPUT)" ]; then \
-		echo "gofmt sucess"; \
-	else \
-		echo "gofmt failure"; \
+golangci-lint: ## Run golangci-lint on codebase
+# https://stackoverflow.com/a/677212/1027058 (check if a command exists or not)
+	@if ! [ -x "$$(command -v golangci-lint)" ]; then \
+		echo "golangci-lint is not installed. Please see https://github.com/golangci/golangci-lint#install for installation instructions."; \
 		exit 1; \
-	fi
+	fi; \
 
-govet:
-	@echo Running govet
-	$(GO) get golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow
-	$(GO) vet $$(go list ./...) .
-	$(GO) vet -vettool=$(GOPATH)/bin/shadow $$(go list ./...)
-	@echo Govet success
+	@echo Running golangci-lint
+	golangci-lint run ./...
 
 package:
 	@ echo Packaging push proxy
 
 	mkdir -p $(DIST_PATH)/bin
-	cp $(GOPATH)/bin/mattermost-push-proxy $(DIST_PATH)/bin
+	cp $(GOBIN)/mattermost-push-proxy $(DIST_PATH)/bin
 
 	cp -RL config $(DIST_PATH)/config
 	touch $(DIST_PATH)/config/build.txt
@@ -74,7 +64,7 @@ package:
 	tar -C dist -czf $(DIST_PATH).tar.gz mattermost-push-proxy
 
 test:
-	$(GO) test $(GOFLAGS) -run=$(TESTS) -test.v -test.timeout=180s ./server || exit 1
+	$(GO) test $(GOFLAGS) -v -timeout=180s ./...
 
 clean:
 	@echo Cleaning
@@ -83,4 +73,4 @@ clean:
 
 run:
 	@echo Starting go web server
-	$(GO) run $(GOFLAGS) main.go
+	$(GO) run $(GOFLAGS) -ldflags '$(LDFLAGS)' main.go

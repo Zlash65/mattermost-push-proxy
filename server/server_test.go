@@ -8,17 +8,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBasicServer(t *testing.T) {
-	LoadConfig("mattermost-push-proxy.json")
-	Start()
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 
 	msg := PushNotification{}
 	msg.Message = "test"
 	msg.Badge = 1
-	msg.DeviceId = "test"
+	msg.DeviceID = "test"
 
 	// Test for missing server Id
 	client := http.Client{}
@@ -33,7 +41,7 @@ func TestBasicServer(t *testing.T) {
 	}
 
 	// Test for missing platform type
-	msg.ServerId = "test"
+	msg.ServerID = "test"
 	client = http.Client{}
 	rq, _ = http.NewRequest("POST", "http://localhost:8066/api/v1/send_push", strings.NewReader(msg.ToJson()))
 	if resp, err := client.Do(rq); err != nil {
@@ -58,22 +66,28 @@ func TestBasicServer(t *testing.T) {
 		}
 	}
 
-	Stop()
+	srv.Stop()
 	time.Sleep(time.Second * 2)
 }
 
 func TestAndroidSend(t *testing.T) {
-	LoadConfig("mattermost-push-proxy.json")
-	CfgPP.AndroidPushSettings[0].AndroidApiKey = "junk"
-	Start()
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+
+	cfg.AndroidPushSettings[0].AndroidAPIKey = "junk"
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 
 	msg := PushNotification{}
 	msg.Message = "test"
 	msg.Badge = 1
-	msg.Platform = PUSH_NOTIFY_ANDROID
-	msg.ServerId = "test"
-	msg.DeviceId = "test"
+	msg.Platform = PushNotifyAndroid
+	msg.ServerID = "test"
+	msg.DeviceID = "test"
 
 	client := http.Client{}
 	rq, _ := http.NewRequest("POST", "http://localhost:8066/api/v1/send_push", strings.NewReader(msg.ToJson()))
@@ -86,6 +100,6 @@ func TestAndroidSend(t *testing.T) {
 		}
 	}
 
-	Stop()
+	srv.Stop()
 	time.Sleep(time.Second * 2)
 }
