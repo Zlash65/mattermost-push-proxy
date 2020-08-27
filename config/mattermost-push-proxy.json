@@ -29,5 +29,8 @@
             "Type":"android_rn",
             "AndroidApiKey":"AAAAJHwIIwA:APA91bHrk6NE9854ZNrvNL0Q3oxbQfpfBvS62wdNfC7fFIoK3lTcNZsAaxONdbHT7JB1x_Z2fvrYEqAG6Qlxbsx8VhbO1osAMFLomQNODmWU2cBSBXBsrVpzr3wBwM13EmxFD4Hno8s1"
         }
-    ]
+    ],
+    "EnableConsoleLog": true,
+    "EnableFileLog": false,
+    "LogFileLocation": ""
 }

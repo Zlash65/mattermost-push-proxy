@@ -4,16 +4,16 @@
 package server
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"github.com/tylerb/graceful"
 	"gopkg.in/throttled/throttled.v1"
 	throttledStore "gopkg.in/throttled/throttled.v1/store"
 )
@@ -25,118 +25,169 @@ const (
 	CONNECTION_TIMEOUT_SECONDS = 60
 )
 
+var (
+	BuildNumber string
+	BuildDate   string
+	BuildHash   string
+)
+
 type NotificationServer interface {
 	SendNotification(msg *PushNotification) PushResponse
 	Initialize() bool
 }
 
-var servers map[string]NotificationServer = make(map[string]NotificationServer)
+// Server is the main struct which performs all activities.
+type Server struct {
+	cfg         *ConfigPushProxy
+	httpServer  *http.Server
+	pushTargets map[string]NotificationServer
+	metrics     *metrics
+	logger      *Logger
+}
 
-var gracefulServer *graceful.Server
+// New returns a new Server instance.
+func New(cfg *ConfigPushProxy, logger *Logger) *Server {
+	return &Server{
+		cfg:         cfg,
+		pushTargets: make(map[string]NotificationServer),
+		logger:      logger,
+	}
+}
 
-func Start() {
-	LogInfo("Push proxy server is initializing...")
+// Start starts the server.
+func (s *Server) Start() {
+	s.logger.Infof("Push proxy server is initializing. BuildNumber: %s, BuildDate: %s, BuildHash: %s", BuildNumber, BuildDate, BuildHash)
 
-	for _, settings := range CfgPP.ApplePushSettings {
-		server := NewAppleNotificationServer(settings)
+	proxyServer := getProxyServer()
+	if proxyServer != "" {
+		s.logger.Infof("Proxy server detected. Routing all requests through: %s", proxyServer)
+	}
+
+	var m *metrics
+	if s.cfg.EnableMetrics {
+		m = newMetrics()
+		s.metrics = m
+	}
+
+	for _, settings := range s.cfg.ApplePushSettings {
+		server := NewAppleNotificationServer(settings, s.logger, m)
 		if server.Initialize() {
-			servers[settings.Type] = server
+			s.pushTargets[settings.Type] = server
 		}
 	}
 
-	for _, settings := range CfgPP.AndroidPushSettings {
-		server := NewAndroideNotificationServer(settings)
+	for _, settings := range s.cfg.AndroidPushSettings {
+		server := NewAndroidNotificationServer(settings, s.logger, m)
 		if server.Initialize() {
-			servers[settings.Type] = server
+			s.pushTargets[settings.Type] = server
 		}
 	}
 
 	router := mux.NewRouter()
-	var handler http.Handler = router
 	vary := throttled.VaryBy{}
 	vary.RemoteAddr = false
-	vary.Headers = strings.Fields(CfgPP.ThrottleVaryByHeader)
-	th := throttled.RateLimit(throttled.PerSec(CfgPP.ThrottlePerSec), &vary, throttledStore.NewMemStore(CfgPP.ThrottleMemoryStoreSize))
+	vary.Headers = strings.Fields(s.cfg.ThrottleVaryByHeader)
+	th := throttled.RateLimit(throttled.PerSec(s.cfg.ThrottlePerSec), &vary, throttledStore.NewMemStore(s.cfg.ThrottleMemoryStoreSize))
 
 	th.DeniedHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		LogError(fmt.Sprintf("%v: code=429 ip=%v", r.URL.Path, GetIpAddress(r)))
+		s.logger.Errorf("%v: code=429 ip=%v", r.URL.Path, s.getIpAddress(r))
 		throttled.DefaultDeniedHandler.ServeHTTP(w, r)
 	})
 
-	handler = th.Throttle(router)
+	handler := th.Throttle(router)
 
 	router.HandleFunc("/", root).Methods("GET")
 
-	metricCompatibleSendNotificationHandler := handleSendNotification
-	metricCompatibleAckNotificationHandler := handleAckNotification
-	if CfgPP.EnableMetrics {
-		MetricsEnabled = true
+	metricCompatibleSendNotificationHandler := s.handleSendNotification
+	metricCompatibleAckNotificationHandler := s.handleAckNotification
+	if s.cfg.EnableMetrics {
 		metrics := NewPrometheusHandler()
 		router.Handle("/metrics", metrics).Methods("GET")
-		metricCompatibleSendNotificationHandler = responseTimeMiddleware(handleSendNotification)
-		metricCompatibleAckNotificationHandler = responseTimeMiddleware(handleAckNotification)
+		metricCompatibleSendNotificationHandler = s.responseTimeMiddleware(s.handleSendNotification)
+		metricCompatibleAckNotificationHandler = s.responseTimeMiddleware(s.handleAckNotification)
 	}
 	r := router.PathPrefix("/api/v1").Subrouter()
 	r.HandleFunc("/send_push", metricCompatibleSendNotificationHandler).Methods("POST")
 	r.HandleFunc("/ack", metricCompatibleAckNotificationHandler).Methods("POST")
 
+	s.httpServer = &http.Server{
+		Addr:         s.cfg.ListenAddress,
+		Handler:      handlers.RecoveryHandler(handlers.PrintRecoveryStack(true))(handler),
+		ReadTimeout:  time.Duration(CONNECTION_TIMEOUT_SECONDS) * time.Second,
+		WriteTimeout: time.Duration(CONNECTION_TIMEOUT_SECONDS) * time.Second,
+	}
 	go func() {
-		gracefulServer = &graceful.Server{
-			Timeout: WAIT_FOR_SERVER_SHUTDOWN,
-			Server: &http.Server{
-				Addr:         CfgPP.ListenAddress,
-				Handler:      handlers.RecoveryHandler(handlers.PrintRecoveryStack(true))(handler),
-				ReadTimeout:  time.Duration(CONNECTION_TIMEOUT_SECONDS) * time.Second,
-				WriteTimeout: time.Duration(CONNECTION_TIMEOUT_SECONDS) * time.Second,
-			},
-		}
-		err := gracefulServer.ListenAndServe()
-		if err != nil {
-			LogCritical(err.Error())
+		err := s.httpServer.ListenAndServe()
+		if err != http.ErrServerClosed {
+			s.logger.Panic(err.Error())
 		}
 	}()
 
-	LogInfo("Server is listening on " + CfgPP.ListenAddress)
+	s.logger.Info("Server is listening on " + s.cfg.ListenAddress)
 }
 
-func Stop() {
-	LogInfo("Stopping Server...")
-	gracefulServer.Stop(WAIT_FOR_SERVER_SHUTDOWN)
+// Stop stops the server.
+func (s *Server) Stop() {
+	s.logger.Info("Stopping Server...")
+	ctx, cancel := context.WithTimeout(context.Background(), WAIT_FOR_SERVER_SHUTDOWN)
+	defer cancel()
+	if s.metrics != nil {
+		s.metrics.shutdown()
+	}
+	// Close shop
+	err := s.httpServer.Shutdown(ctx)
+	if err != nil {
+		s.logger.Error(err.Error())
+	}
 }
 
 func root(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("<html><body>Mattermost Push Proxy</body></html>"))
+	_, _ = w.Write([]byte("<html><body>Mattermost Push Proxy</body></html>"))
 }
 
-func responseTimeMiddleware(f func(w http.ResponseWriter, r *http.Request)) func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) responseTimeMiddleware(f func(w http.ResponseWriter, r *http.Request)) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		f(w, r)
-		observeServiceResponse(time.Since(start).Seconds())
+		if s.metrics != nil {
+			s.metrics.observeServiceResponse(time.Since(start).Seconds())
+		}
 	}
 }
 
-func handleSendNotification(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSendNotification(w http.ResponseWriter, r *http.Request) {
 	msg := PushNotificationFromJson(r.Body)
 
 	if msg == nil {
-		rMsg := LogError("Failed to read message body")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+		rMsg := "Failed to read message body"
+		s.logger.Error(rMsg)
+		resp := NewErrorPushResponse(rMsg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
-	if len(msg.ServerId) == 0 {
-		rMsg := LogError("Failed because of missing server Id")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+	if msg.ServerID == "" {
+		rMsg := "Failed because of missing server Id"
+		s.logger.Error(rMsg)
+		resp := NewErrorPushResponse(rMsg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
-	if len(msg.DeviceId) == 0 {
-		rMsg := LogError(fmt.Sprintf("Failed because of missing device Id serverId=%v", msg.ServerId))
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+	if msg.DeviceID == "" {
+		rMsg := fmt.Sprintf("Failed because of missing device Id serverId=%v", msg.ServerID)
+		s.logger.Error(rMsg)
+		resp := NewErrorPushResponse(rMsg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
@@ -144,86 +195,102 @@ func handleSendNotification(w http.ResponseWriter, r *http.Request) {
 		msg.Message = msg.Message[0:2046]
 	}
 
-	if server, ok := servers[msg.Platform]; ok {
+	if server, ok := s.pushTargets[msg.Platform]; ok {
 		rMsg := server.SendNotification(msg)
-		w.Write([]byte(rMsg.ToJson()))
+		_, _ = w.Write([]byte(rMsg.ToJson()))
 		return
 	} else {
-		rMsg := LogError(fmt.Sprintf("Did not send message because of missing platform property type=%v serverId=%v", msg.Platform, msg.ServerId))
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+		rMsg := fmt.Sprintf("Did not send message because of missing platform property type=%v serverId=%v", msg.Platform, msg.ServerID)
+		s.logger.Error(rMsg)
+		resp := NewErrorPushResponse(rMsg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 }
 
-func handleAckNotification(w http.ResponseWriter, r *http.Request) {
-	ack := PushNotificationAckFromJson(r.Body)
+func (s *Server) handleAckNotification(w http.ResponseWriter, r *http.Request) {
+	ack := PushNotificationAckFromJSON(r.Body)
 
 	if ack == nil {
-		rMsg := LogError("Failed to read ack body")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+		msg := "Failed to read ack body"
+		s.logger.Error(msg)
+		resp := NewErrorPushResponse(msg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
-	if len(ack.Id) == 0 {
-		rMsg := LogError("Failed because of missing ack Id")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+	if ack.ID == "" {
+		msg := "Failed because of missing ack Id"
+		s.logger.Error(msg)
+		resp := NewErrorPushResponse(msg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
-	if len(ack.Platform) == 0 {
-		rMsg := LogError("Failed because of missing ack platform")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+	if ack.Platform == "" {
+		msg := "Failed because of missing ack platform"
+		s.logger.Error(msg)
+		resp := NewErrorPushResponse(msg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
-	if len(ack.Type) == 0 {
-		rMsg := LogError("Failed because of missing ack type")
-		w.Write([]byte(rMsg.ToJson()))
-		incrementBadRequest()
+	if ack.Type == "" {
+		msg := "Failed because of missing ack type"
+		s.logger.Error(msg)
+		resp := NewErrorPushResponse(msg)
+		_, _ = w.Write([]byte(resp.ToJson()))
+		if s.metrics != nil {
+			s.metrics.incrementBadRequest()
+		}
 		return
 	}
 
 	// Increment ACK
-	LogInfo(fmt.Sprintf("Acknowledge delivery receipt for AckId=%v", ack.Id))
-	incrementDelivered(ack.Platform, ack.Type)
+	s.logger.Infof("Acknowledge delivery receipt for AckId=%v", ack.ID)
+	if s.metrics != nil {
+		s.metrics.incrementDelivered(ack.Platform, ack.Type)
+	}
 
 	rMsg := NewOkPushResponse()
-	w.Write([]byte(rMsg.ToJson()))
-	return
+	_, _ = w.Write([]byte(rMsg.ToJson()))
 }
 
-func LogInfo(msg string) {
-	Log("INFO", msg)
-}
-
-func LogError(msg string) PushResponse {
-	Log("ERROR", msg)
-	return NewErrorPushResponse(msg)
-}
-
-func LogCritical(msg string) {
-	Log("CRIT", msg)
-	panic(msg)
-}
-
-func Log(level string, msg string) {
-	log.Printf("%v %v\n", level, msg)
-}
-
-func GetIpAddress(r *http.Request) string {
+func (s *Server) getIpAddress(r *http.Request) string {
 	address := r.Header.Get(HEADER_FORWARDED)
+	var err error
 
-	if len(address) == 0 {
+	if address == "" {
 		address = r.Header.Get(HEADER_REAL_IP)
 	}
 
-	if len(address) == 0 {
-		address, _, _ = net.SplitHostPort(r.RemoteAddr)
+	if address == "" {
+		address, _, err = net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			s.logger.Errorf("error in getting IP address: %v", err)
+		}
 	}
 
 	return address
+}
+
+func getProxyServer() string {
+	// HTTPS_PROXY gets the higher priority.
+	proxyServer := os.Getenv("HTTPS_PROXY")
+	if proxyServer == "" {
+		proxyServer = os.Getenv("HTTP_PROXY")
+	}
+	return proxyServer
 }
