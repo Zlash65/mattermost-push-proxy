@@ -8,30 +8,41 @@ import (
 	"time"
 
 	"github.com/prometheus/common/expfmt"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMetricDisabled(t *testing.T) {
 	t.Log("Testing Metrics Enabled")
-	LoadConfig("mattermost-push-proxy.json")
 	platform := "junk"
-	pushType := PUSH_TYPE_MESSAGE
-	CfgPP.AndroidPushSettings[0].AndroidApiKey = platform
-	CfgPP.EnableMetrics = false
-	Start()
+	pushType := PushTypeMessage
+
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+	cfg.AndroidPushSettings[0].AndroidAPIKey = platform
+	cfg.EnableMetrics = false
+
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 	defer func() {
-		Stop()
+		srv.Stop()
 		time.Sleep(time.Second * 2)
 	}()
 
-	incrementBadRequest()
-	incrementNotificationTotal(platform, pushType)
-	incrementSuccess(platform, pushType)
-	incrementRemoval(platform, pushType, "not registered")
-	incrementFailure(platform, pushType, "error")
-	observerNotificationResponse(PUSH_NOTIFY_APPLE, 1)
-	observerNotificationResponse(PUSH_NOTIFY_ANDROID, 1)
-	observeServiceResponse(1)
+	m := newMetrics()
+	defer m.shutdown()
+
+	m.incrementBadRequest()
+	m.incrementNotificationTotal(platform, pushType)
+	m.incrementSuccess(platform, pushType)
+	m.incrementRemoval(platform, pushType, "not registered")
+	m.incrementFailure(platform, pushType, "error")
+	m.observerNotificationResponse(PushNotifyApple, 1)
+	m.observerNotificationResponse(PushNotifyAndroid, 1)
+	m.observeServiceResponse(1)
 
 	resp, err := http.Get("http://localhost:8066/metrics")
 	if err != nil {
@@ -50,26 +61,33 @@ func TestMetricDisabled(t *testing.T) {
 
 func TestMetricEnabled(t *testing.T) {
 	t.Log("Testing Metrics Enabled")
-	LoadConfig("mattermost-push-proxy.json")
 	platform := "junk"
-	pushType := PUSH_TYPE_MESSAGE
-	CfgPP.AndroidPushSettings[0].AndroidApiKey = platform
-	CfgPP.EnableMetrics = true
-	Start()
+	pushType := PushTypeMessage
+
+	fileName := FindConfigFile("mattermost-push-proxy.json")
+	cfg, err := LoadConfig(fileName)
+	require.NoError(t, err)
+	cfg.AndroidPushSettings[0].AndroidAPIKey = platform
+	cfg.EnableMetrics = true
+
+	logger := NewLogger(cfg)
+	srv := New(cfg, logger)
+	srv.Start()
+
 	time.Sleep(time.Second * 2)
 	defer func() {
-		Stop()
+		srv.Stop()
 		time.Sleep(time.Second * 2)
 	}()
 
-	incrementBadRequest()
-	incrementNotificationTotal(platform, pushType)
-	incrementSuccess(platform, pushType)
-	incrementRemoval(platform, pushType, "not registered")
-	incrementFailure(platform, pushType, "error")
-	observerNotificationResponse(PUSH_NOTIFY_APPLE, 1)
-	observerNotificationResponse(PUSH_NOTIFY_ANDROID, 1)
-	observeServiceResponse(1)
+	srv.metrics.incrementBadRequest()
+	srv.metrics.incrementNotificationTotal(platform, pushType)
+	srv.metrics.incrementSuccess(platform, pushType)
+	srv.metrics.incrementRemoval(platform, pushType, "not registered")
+	srv.metrics.incrementFailure(platform, pushType, "error")
+	srv.metrics.observerNotificationResponse(PushNotifyApple, 1)
+	srv.metrics.observerNotificationResponse(PushNotifyAndroid, 1)
+	srv.metrics.observeServiceResponse(1)
 
 	resp, err := http.Get("http://localhost:8066/metrics")
 	if err != nil {
